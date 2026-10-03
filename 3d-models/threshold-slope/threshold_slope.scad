@@ -43,7 +43,7 @@ lip_thickness = 4;
 // 3 -> ~243 mm parts (250 mm+ beds), 4 -> ~183 mm parts (220 mm beds).
 segments = 3;
 // What to output.
-part = "assembly"; // [assembly, segment, key, pin, hardware_plate]
+part = "assembly"; // [assembly, segment, key, pin, hardware_plate, end_section]
 // Which segment when part = "segment" (0 = left end).
 segment_index = 0;
 
@@ -62,10 +62,12 @@ show_walls = true;   // ghost walls in the assembly view
 explode = 0;         // gap between segments in the assembly view
 
 /* [Grip] */
-grooves = true;
-groove_pitch = 10; // measured along the slope
-groove_width = 3;
-groove_depth = 1;
+// Raised ribs with a smooth raised-cosine profile: no slots or sharp inside
+// corners to trap dirt, so a cloth or mop wipes straight over them.
+ribs = true;
+rib_pitch = 12;    // centre to centre, measured along the slope
+rib_width = 6;     // base width; the rib blends tangentially into the slope
+rib_height = 1.5;
 
 /* [Hidden] */
 $fn = 40;
@@ -92,12 +94,17 @@ key_ys = [key_y_min, key_y_max];
 pin_ys = [(key_y_min + key_y_max) / 2, y_body - pin_d / 2 - 6];
 pin_yz = [for (y = pin_ys) [y, top(y) / 2]];
 
-groove_y0 = (5 - toe) / k + groove_width;
-groove_y1 = y_body - groove_width - 2;
-groove_ys = [for (y = [groove_y0 : groove_pitch * cos(slope_angle) : groove_y1]) y];
+// First rib clear of the front edge; last rib's crest no higher than the top
+// of the slope, so nothing sticks up at the step.
+rib_y0 = rib_width / 2 + 4;
+rib_y1 = min((height - rib_height - toe) / k, y_body - rib_width / 2 - 1);
+rib_n = max(1, round((rib_y1 - rib_y0) / (rib_pitch * cos(slope_angle))) + 1);
+rib_ys = [for (i = [0 : rib_n - 1]) rib_n == 1 ? rib_y0 : rib_y0 + i * (rib_y1 - rib_y0) / (rib_n - 1)];
 
 assert(key_y_min < key_y_max - key_width, "Ramp too low/short for two keys: reduce key_height or key_width");
-assert(lip_thickness + groove_depth < height, "lip_thickness too large");
+assert(lip_thickness < height, "lip_thickness too large");
+// Steeper ribs would undercut on the downhill side (dirt trap, needs support).
+assert(atan(rib_height * PI / rib_width) + slope_angle < 75, "Ribs too steep: lower rib_height or widen rib_width");
 
 // ---- building blocks ------------------------------------------------------
 
@@ -111,20 +118,24 @@ module above_plane(a, b, c, size = 3000)
   multmatrix([[1, 0, 0, 0], [0, 1, 0, 0], [a, b, 1, c], [0, 0, 0, 1]])
     translate([-size / 2, -size / 2, 0]) cube(size);
 
+// One rib in slope-local coordinates (u along the slope, v normal to it).
+// The base dips 1 mm into the body so the union is clean.
+module rib_2d() {
+  n = 24;
+  polygon(concat(
+    [for (i = [0 : n]) let(u = -rib_width / 2 + i * rib_width / n)
+      [u, rib_height / 2 * (1 + cos(360 * u / rib_width))]],
+    [[rib_width / 2, -1], [-rib_width / 2, -1]]));
+}
+
 // Cross-section of the ramp in the Y-Z plane, including the back scribe lip.
 module profile() {
-  difference() {
-    union() {
-      polygon([[0, 0], [y_body, 0], [y_body, height], [0, toe]]);
-      if (fit_back)
-        polygon([[y_body, height - chamfer_band], [y_max, height - lip_thickness],
-                 [y_max, height], [y_body, height]]);
-    }
-    if (grooves)
-      for (y = groove_ys)
-        translate([y, top(y)]) rotate(slope_angle)
-          square([groove_width, 2 * groove_depth], center = true);
-  }
+  polygon([[0, 0], [y_body, 0], [y_body, height], [0, toe]]);
+  if (fit_back)
+    polygon([[y_body, height - chamfer_band], [y_max, height - lip_thickness],
+             [y_max, height], [y_body, height]]);
+  if (ribs)
+    for (y = rib_ys) translate([y, top(y)]) rotate(slope_angle) rib_2d();
 }
 
 // Scribe lip on an end wall: same top surface as the ramp, underside rising at
@@ -217,6 +228,17 @@ module walls_ghost() {
   }
 }
 
+// Left end piece sliced through the middle of the slope, next to its wall, to
+// show the side scribe lip reaching past the wall line.
+module end_section() {
+  yc = depth / 2;
+  intersection() {
+    segment(0);
+    translate([x_min - 1, yc, -1]) cube([60, depth, height + 2]);
+  }
+  color([0.6, 0.6, 0.6, 0.35]) translate([-15, yc, 0]) cube([15, depth / 2, height + 25]);
+}
+
 module assembly() {
   palette = [[0.90, 0.45, 0.15], [0.20, 0.55, 0.80], [0.35, 0.70, 0.35], [0.80, 0.70, 0.20], [0.6, 0.4, 0.8]];
   for (i = [0 : segments - 1])
@@ -234,3 +256,4 @@ else if (part == "segment")
 else if (part == "key") key();
 else if (part == "pin") pin();
 else if (part == "hardware_plate") hardware_plate();
+else if (part == "end_section") end_section();
